@@ -30,4 +30,7 @@ jails = ["sshd"]
 [last_login]
 marcel = 2
 
+[load_avg]
+prefix = "Load (1/5/15 min.):"
+
 [last_run]
