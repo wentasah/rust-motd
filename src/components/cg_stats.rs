@@ -256,7 +256,18 @@ fn read_cg_state() -> Result<State, Box<dyn Error>> {
     // Read statistics of system services and shorten too long names, e.g.,
     // docker-dcd9a8c71b756de71a4a837c005840f84e0ed92574704ae1c89409c57980aaee.scope
     let re = Regex::new(r"\.service|\.scope|\.slice")?;
-    state.system = read_stats("system.slice", |key| re.replace(key, "").to_string())?;
+    state.system = read_stats("system.slice", |key| {
+        let name_no_suffix = re.replace(key, "");
+        let max_len = 20;
+        if name_no_suffix.len() <= max_len {
+            name_no_suffix.to_string()
+        } else {
+            let mut name = name_no_suffix.to_string();
+            name.truncate(max_len);
+            name += "...";
+            name
+        }
+    })?;
 
     // Read statistics of users and convert UIDs to user names
     let re = Regex::new(r"^user-([0-9]+)\.slice$")?;
