@@ -104,8 +104,13 @@ impl Component for PreparedCgStats {
             Duration::from_secs((secs + 30) / 60 * 60)
         };
         println!(
-            "CPU usage in the past {}:",
-            humantime::format_duration(rounded_time)
+            "CPU usage in the past {}:{}",
+            humantime::format_duration(rounded_time),
+            if self.users.len() + self.services.len() == 0 {
+                format!(" {}almost idle{}", color::Fg(color::Green), style::Reset)
+            } else {
+                "".into()
+            }
         );
         let indent = " ".repeat(INDENT_WIDTH);
         let width = width.unwrap_or(global_config.progress_width - INDENT_WIDTH);
