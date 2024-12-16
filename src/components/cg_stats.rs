@@ -258,12 +258,12 @@ fn read_cg_state() -> Result<State, Box<dyn Error>> {
     let re = Regex::new(r"\.service|\.scope|\.slice")?;
     state.system = read_stats("system.slice", |key| {
         let name_no_suffix = re.replace(key, "");
-        let max_len = 20;
+        let max_len = 23;
         if name_no_suffix.len() <= max_len {
             name_no_suffix.to_string()
         } else {
             let mut name = name_no_suffix.to_string();
-            name.truncate(max_len);
+            name.truncate(max_len - 3);
             name += "...";
             name
         }
