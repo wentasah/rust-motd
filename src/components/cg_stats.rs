@@ -31,10 +31,14 @@ pub struct CgStats {
 impl Component for CgStats {
     fn prepare(self: Box<Self>, global_config: &GlobalConfig) -> PrepareReturn {
         self.prepare_or_error(global_config)
+            .map_err(|e| {
+                eprintln!("cg_stats error: {e}");
+                e
+            })
             .unwrap_or((self, Some(Constraints { min_width: None })))
     }
     async fn print(self: Box<Self>, _global_config: &GlobalConfig, _width: Option<usize>) {
-        panic!("CgStat::print should never be called");
+        println!("cg_stats component failed");
     }
 }
 
