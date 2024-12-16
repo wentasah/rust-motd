@@ -53,7 +53,7 @@ impl CgStats {
         let mut prepared_cg_stats = PreparedCgStats::default();
 
         if let Ok(before) = fs::read_to_string(&self.state_file)
-            .and_then(|s| toml::from_str::<State>(&s).map_err(|err| io::Error::other(err)))
+            .and_then(|s| toml::from_str::<State>(&s).map_err(io::Error::other))
         {
             let time_span = now.time.duration_since(before.time)?;
             let treshold = self.threshold;
@@ -110,8 +110,8 @@ impl Component for PreparedCgStats {
         let indent = " ".repeat(INDENT_WIDTH);
         let width = width.unwrap_or(global_config.progress_width - INDENT_WIDTH);
         let bar_width = width - INDENT_WIDTH - self.max_name_width - 1 - 5;
-        for (title, data) in vec![("Users", &self.users), ("Services", &self.services)] {
-            if data.len() > 0 {
+        for (title, data) in [("Users", &self.users), ("Services", &self.services)] {
+            if !data.is_empty() {
                 println!("{indent}{title}:");
             }
             for stat in data {
@@ -271,17 +271,14 @@ fn read_cg_state() -> Result<State, Box<dyn Error>> {
 
     // Read statistics of users and convert UIDs to user names
     let re = Regex::new(r"^user-([0-9]+)\.slice$")?;
-    state.user = read_stats("user.slice", |key| match re.captures(&key) {
+    state.user = read_stats("user.slice", |key| match re.captures(key) {
         Some(cap) => {
             let uid = match cap[1].parse::<u32>() {
                 Ok(uid) => uid,
                 Err(_) => return key.to_owned(),
             };
             let user = users::get_user_by_uid(uid);
-            let username = user
-                .as_ref()
-                .and_then(|u| u.name().to_str())
-                .unwrap_or(&key);
+            let username = user.as_ref().and_then(|u| u.name().to_str()).unwrap_or(key);
             username.to_owned()
         }
         None => key.to_owned(),
