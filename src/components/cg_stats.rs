@@ -1,16 +1,16 @@
 use std::collections::HashMap;
-use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::thread::available_parallelism;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, SystemTimeError};
 
 use async_trait::async_trait;
 use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use termion::{color, style};
+use thiserror::Error;
 use walkdir::WalkDir;
 
 use crate::component::{Component, Constraints, PrepareReturn};
@@ -42,20 +42,57 @@ impl Component for CgStats {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum CgStatsError {
+    #[error("File `{0}`: {1}")]
+    FileError(PathBuf, io::Error),
+
+    #[error("Failed to parse `{0}`")]
+    ParseError(PathBuf),
+
+    #[error("Failed to parse a number in {0}: {1}")]
+    ParseIntError(PathBuf, std::num::ParseIntError),
+
+    #[error("Field {1} not found in {0}")]
+    MissingField(PathBuf, String),
+
+    #[error(transparent)]
+    WalkdirError(#[from] walkdir::Error),
+
+    #[error(transparent)]
+    TomlSerialization(#[from] toml::ser::Error),
+
+    #[error("Failed to calculate time span from time in {0} ({1})")]
+    TimeSpan(PathBuf, SystemTimeError),
+
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+}
+
 impl CgStats {
     pub fn prepare_or_error(
         &self,
         _global_config: &GlobalConfig,
-    ) -> Result<PrepareReturn, Box<dyn Error>> {
+    ) -> Result<PrepareReturn, CgStatsError> {
         let num_cpus = available_parallelism()?.get();
         let now = read_cg_state()?;
 
         let mut prepared_cg_stats = PreparedCgStats::default();
 
         if let Ok(before) = fs::read_to_string(&self.state_file)
-            .and_then(|s| toml::from_str::<State>(&s).map_err(io::Error::other))
+            .inspect_err(|e| eprintln!("Reading {} failed: {e}", self.state_file))
+            .and_then(|s| {
+                toml::from_str::<State>(&s).map_err(|e| {
+                    eprintln!("Parsing TOML from {} failed: {e}", self.state_file);
+                    io::Error::other(e)
+                })
+            })
         {
-            let time_span = now.time.duration_since(before.time)?;
+            // Calculate the statistics
+            let time_span = now
+                .time
+                .duration_since(before.time)
+                .map_err(|e| CgStatsError::TimeSpan((&self.state_file).into(), e))?;
             let treshold = self.threshold;
             prepared_cg_stats.time_span = time_span;
             prepared_cg_stats.users =
@@ -70,7 +107,8 @@ impl CgStats {
                 .max()
                 .unwrap_or(0);
         }
-        fs::write(&self.state_file, toml::to_string(&now)?)?;
+        fs::write(&self.state_file, toml::to_string(&now)?)
+            .map_err(|e| CgStatsError::FileError(PathBuf::from(&self.state_file), e))?;
         let min_width = INDENT_WIDTH + prepared_cg_stats.max_name_width + 12 + 5;
         Ok((
             Box::new(prepared_cg_stats),
@@ -214,27 +252,35 @@ fn get_prepared_stats(
 }
 
 /// Read statistics from a single Cgroup
-fn read_cg_stat(cg_path: &Path) -> Result<CgStat, Box<dyn Error>> {
+fn read_cg_stat(cg_path: &Path) -> Result<CgStat, CgStatsError> {
     let path = cg_path.join("cpu.stat");
-    let f = File::open(path.clone())?;
+    let f = File::open(path.clone()).map_err(|e| CgStatsError::FileError(path.to_owned(), e))?;
     for line in BufReader::new(f).lines() {
         let l = line?;
         let (key, value) = l
             .split_whitespace()
             .next_tuple()
-            .ok_or_else(|| io::Error::other(format!("Reading fields from {path:?}")))?;
-        match (key, value.parse::<u64>()?) {
+            .ok_or_else(|| CgStatsError::ParseError(path.clone()))?;
+        match (
+            key,
+            value
+                .parse::<u64>()
+                .map_err(|e| CgStatsError::ParseIntError(path.clone(), e))?,
+        ) {
             ("usage_usec", val) => return Ok(CgStat { usage_usec: val }),
             _ => (),
         }
     }
-    Err(io::Error::other("Missing {field} in {path}").into())
+    Err(CgStatsError::MissingField(
+        path.clone(),
+        "usage_usec".into(),
+    ))
 }
 
 /// Read statistics from direct children of a Cgroup given by `slice`.
 /// The keys of the returned hash map are the names of Cgroups passed
 /// through the `rename_key` function.
-fn read_stats<F>(slice: &str, rename_key: F) -> Result<HashMap<String, CgStat>, Box<dyn Error>>
+fn read_stats<F>(slice: &str, rename_key: F) -> Result<HashMap<String, CgStat>, CgStatsError>
 where
     F: Fn(&str) -> String,
 {
@@ -252,7 +298,7 @@ where
     Ok(stats)
 }
 
-fn read_cg_state() -> Result<State, Box<dyn Error>> {
+fn read_cg_state() -> Result<State, CgStatsError> {
     let mut state = State {
         time: SystemTime::now(),
         user: HashMap::new(),
@@ -260,7 +306,7 @@ fn read_cg_state() -> Result<State, Box<dyn Error>> {
     };
     // Read statistics of system services and shorten too long names, e.g.,
     // docker-dcd9a8c71b756de71a4a837c005840f84e0ed92574704ae1c89409c57980aaee.scope
-    let re = Regex::new(r"\.service|\.scope|\.slice")?;
+    let re = Regex::new(r"\.service|\.scope|\.slice").unwrap();
     state.system = read_stats("system.slice", |key| {
         let name_no_suffix = re.replace(key, "");
         let max_len = 23;
@@ -275,7 +321,7 @@ fn read_cg_state() -> Result<State, Box<dyn Error>> {
     })?;
 
     // Read statistics of users and convert UIDs to user names
-    let re = Regex::new(r"^user-([0-9]+)\.slice$")?;
+    let re = Regex::new(r"^user-([0-9]+)\.slice$").unwrap();
     state.user = read_stats("user.slice", |key| match re.captures(key) {
         Some(cap) => {
             let uid = match cap[1].parse::<u32>() {
